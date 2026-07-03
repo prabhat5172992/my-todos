@@ -387,6 +387,17 @@ input,textarea,select{font-family:inherit;}
 .modal-footer .btn-ghost{width:auto;margin-top:0;padding:10px 16px;}
 .modal-delete{background:none;border:none;color:var(--high);font-size:13px;font-weight:600;}
 
+/* paste-import modal specifics */
+#pasteImportOverlay .modal{max-width:480px;}
+#pasteImportText{
+  width:100%;min-height:200px;border:1.5px solid var(--line);border-radius:8px;padding:10px 12px;
+  font-size:12.5px;font-family:'IBM Plex Mono',monospace;resize:vertical;outline:none;background:var(--white);
+}
+#pasteImportText:focus{border-color:var(--ink);}
+.import-choice-row{display:flex;gap:8px;flex-wrap:wrap;}
+.import-choice-row .icon-btn{color:var(--ink);background:var(--paper-dim);border:1px solid var(--line);}
+.import-choice-row .icon-btn:hover{background:var(--line);}
+
 /* toast */
 #toastWrap{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);z-index:60;display:flex;flex-direction:column;gap:8px;align-items:center;}
 .toast{
@@ -451,8 +462,9 @@ input,textarea,select{font-family:inherit;}
       </div>
       <div class="header-actions">
         <button class="icon-btn" id="exportBtn">⭳ Export backup</button>
-        <button class="icon-btn" id="importBtn">⭱ Import backup</button>
+        <button class="icon-btn" id="importBtn">⭱ Import file</button>
         <input type="file" id="importFile" accept="application/json" class="hidden">
+        <button class="icon-btn" id="pasteImportBtn">⎘ Paste JSON</button>
         <button class="icon-btn" id="logoutBtn">Log out</button>
       </div>
     </div>
@@ -563,6 +575,24 @@ input,textarea,select{font-family:inherit;}
       <div style="display:flex;gap:8px;">
         <button class="btn btn-ghost" id="modalCancelBtn">Cancel</button>
         <button class="btn btn-primary" id="modalSaveBtn">Save</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== PASTE JSON IMPORT MODAL ===================== -->
+<div class="modal-overlay" id="pasteImportOverlay">
+  <div class="modal">
+    <h2>Paste backup JSON</h2>
+    <div class="field">
+      <label for="pasteImportText">JSON content</label>
+      <textarea id="pasteImportText" placeholder='Paste the contents of a Daybook backup .json file here…&#10;e.g. {"user":"demo","todos":[...]} or a plain array of tasks'></textarea>
+    </div>
+    <div class="modal-footer">
+      <div></div>
+      <div style="display:flex;gap:8px;">
+        <button class="btn btn-ghost" id="pasteImportCancelBtn">Cancel</button>
+        <button class="btn btn-primary" id="pasteImportSubmitBtn">Import</button>
       </div>
     </div>
   </div>
@@ -811,8 +841,6 @@ function renderHeaderNav(){
     const label=`${MONTHS[fromISO(dates[0]).getMonth()].slice(0,3)} ${fromISO(dates[0]).getDate()} – ${MONTHS[fromISO(dates[6]).getMonth()].slice(0,3)} ${fromISO(dates[6]).getDate()}`;
     $('dateLabel').textContent=label;
   }
-  const addRow=document.querySelector('.add-row');
-  // keep add bar scoped to selectedDate always
 }
 
 function renderWeekStrip(){
@@ -953,7 +981,7 @@ function toggleSelect(id){
 /* ---------------- view toggle / nav ---------------- */
 $('dayViewBtn').addEventListener('click',()=>{ viewMode='day'; render(); });
 $('weekViewBtn').addEventListener('click',()=>{ viewMode='week'; render(); });
-$('todayBtn').addEventListener('click',()=>{ selectedDate=todayISO(); if(viewMode==='week'){} render(); });
+$('todayBtn').addEventListener('click',()=>{ selectedDate=todayISO(); render(); });
 $('prevBtn').addEventListener('click',()=>{
   selectedDate = viewMode==='day' ? addDays(selectedDate,-1) : addDays(selectedDate,-7);
   render();
@@ -1057,11 +1085,8 @@ $('modalDeleteBtn').addEventListener('click',()=>{
   deleteTodos([editingId]);
   closeModal();
 });
-document.addEventListener('keydown',(e)=>{
-  if(e.key==='Escape' && $('modalOverlay').style.display==='flex') closeModal();
-});
 
-/* ---------------- export / import ---------------- */
+/* ---------------- export / import (shared) ---------------- */
 $('exportBtn').addEventListener('click',()=>{
   const payload={ user:currentUser, exportedAt:new Date().toISOString(), todos };
   const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
@@ -1072,35 +1097,67 @@ $('exportBtn').addEventListener('click',()=>{
   URL.revokeObjectURL(url);
   showToast('Backup file downloaded.');
 });
+
+// Shared parser/merger used by both the file-upload import and the paste-JSON import.
+// Returns true on success, false on failure (and shows a toast either way).
+function handleImportData(rawText, errMsg){
+  try{
+    const data=JSON.parse(rawText);
+    const incoming=Array.isArray(data) ? data : data.todos;
+    if(!Array.isArray(incoming)) throw new Error('bad format');
+    const existingIds=new Set(todos.map(t=>t.id));
+    const merged=incoming.filter(t=>t && t.id && t.title).map(t=>({
+      id: existingIds.has(t.id) ? uid() : t.id,
+      title:String(t.title).slice(0,200),
+      notes:t.notes||'',
+      priority:['high','medium','low'].includes(t.priority)?t.priority:'medium',
+      date:t.date||todayISO(),
+      done:!!t.done,
+      createdAt:t.createdAt||Date.now()
+    }));
+    if(!merged.length) throw new Error('no valid tasks found');
+    todos=todos.concat(merged);
+    persist(); render();
+    showToast(`Imported ${merged.length} task${merged.length!==1?'s':''}.`);
+    return true;
+  }catch(err){
+    showToast(errMsg || 'Could not read that JSON — is it a Daybook backup?');
+    return false;
+  }
+}
+
 $('importBtn').addEventListener('click',()=>{ $('importFile').click(); });
 $('importFile').addEventListener('change',(e)=>{
   const file=e.target.files[0];
   if(!file) return;
   const reader=new FileReader();
   reader.onload=()=>{
-    try{
-      const data=JSON.parse(reader.result);
-      const incoming=Array.isArray(data) ? data : data.todos;
-      if(!Array.isArray(incoming)) throw new Error('bad format');
-      const existingIds=new Set(todos.map(t=>t.id));
-      const merged=incoming.filter(t=>t && t.id && t.title).map(t=>({
-        id: existingIds.has(t.id) ? uid() : t.id,
-        title:String(t.title).slice(0,200),
-        notes:t.notes||'',
-        priority:['high','medium','low'].includes(t.priority)?t.priority:'medium',
-        date:t.date||todayISO(),
-        done:!!t.done,
-        createdAt:t.createdAt||Date.now()
-      }));
-      todos=todos.concat(merged);
-      persist(); render();
-      showToast(`Imported ${merged.length} task${merged.length!==1?'s':''}.`);
-    }catch(err){
-      showToast('Could not read that file — is it a Daybook backup?');
-    }
+    handleImportData(reader.result, 'Could not read that file — is it a Daybook backup?');
     e.target.value='';
   };
   reader.readAsText(file);
+});
+
+/* ---------------- paste JSON import ---------------- */
+$('pasteImportBtn').addEventListener('click',()=>{
+  $('pasteImportText').value='';
+  $('pasteImportOverlay').style.display='flex';
+  $('pasteImportText').focus();
+});
+function closePasteImport(){ $('pasteImportOverlay').style.display='none'; }
+$('pasteImportCancelBtn').addEventListener('click',closePasteImport);
+$('pasteImportOverlay').addEventListener('click',(e)=>{ if(e.target.id==='pasteImportOverlay') closePasteImport(); });
+$('pasteImportSubmitBtn').addEventListener('click',()=>{
+  const raw=$('pasteImportText').value.trim();
+  if(!raw){ showToast('Paste some JSON first.'); return; }
+  const ok=handleImportData(raw, "That doesn't look like valid Daybook JSON.");
+  if(ok) closePasteImport();
+});
+
+document.addEventListener('keydown',(e)=>{
+  if(e.key!=='Escape') return;
+  if($('modalOverlay').style.display==='flex') closeModal();
+  if($('pasteImportOverlay').style.display==='flex') closePasteImport();
 });
 
 /* ---------------- boot ---------------- */
