@@ -623,6 +623,22 @@ function formatLong(iso){
 }
 function uid(){ return 't'+Date.now().toString(36)+Math.random().toString(36).slice(2,8); }
 
+function rolloverTasks() {
+    const today = todayISO();
+    let changed = false;
+    todos.forEach(task => {
+        if (task.done) return;
+        while (task.date < today) {
+            task.date = addDays(task.date, 1);
+            task.carriedOver = true;
+            changed = true;
+        }
+    });
+
+    if (changed) {
+        persist();
+    }
+}
 /* ---------------- storage ---------------- */
 const USERS_KEY='daybook_users';
 const SESSION_KEY='daybook_session';
@@ -712,6 +728,7 @@ $('logoutBtn').addEventListener('click',()=>{
 
 function enterApp(){
   todos=loadTodos(currentUser);
+  rolloverTasks();
   viewMode='day';
   selectedDate=todayISO();
   filterMode='all';
@@ -730,11 +747,20 @@ function persist(){ saveTodos(currentUser, todos); }
 function addTodo(title, priority, date, notes){
   title=title.trim();
   if(!title) return;
-  todos.push({id:uid(), title, notes:notes||'', priority:priority||'medium', date:date||selectedDate, done:false, createdAt:Date.now()});
+  todos.push({
+    id: uid(),
+    title,
+    notes: notes || '',
+    priority: priority || 'medium',
+    date: date || selectedDate,
+    done: false,
+    carriedOver: false,
+    createdAt: Date.now()
+});
   persist(); render();
 }
 function bulkAddTodos(lines, date, priority){
-  const items=lines.map(l=>l.trim()).filter(Boolean).map(t=>({id:uid(),title:t,notes:'',priority:priority||'medium',date:date||selectedDate,done:false,createdAt:Date.now()}));
+  const items=lines.map(l=>l.trim()).filter(Boolean).map(t=>({id:uid(),title:t,notes:'',priority:priority||'medium',date:date||selectedDate,done:false,carriedOver:false,createdAt:Date.now()}));
   if(!items.length) return;
   todos=todos.concat(items);
   persist(); render();
@@ -918,7 +944,12 @@ function cardHTML(t){
       <div class="todo-title">${escapeHtml(t.title)}</div>
       <div class="todo-meta">
         <span class="tag ${tagClass}">${priorityLabel}</span>
-        ${isOverdue?'<span class="tag tag-overdue">Overdue</span>':''}
+        ${t.carriedOver
+        ? '<span class="tag tag-date">↪ Carried Over</span>'
+        : (isOverdue
+        ? '<span class="tag tag-overdue">Overdue</span>'
+        : '')
+        }
         ${dateTag}
       </div>
       ${t.notes?`<div class="todo-notes">${escapeHtml(t.notes)}</div>`:''}
@@ -1112,8 +1143,9 @@ function handleImportData(rawText, errMsg){
       notes:t.notes||'',
       priority:['high','medium','low'].includes(t.priority)?t.priority:'medium',
       date:t.date||todayISO(),
-      done:!!t.done,
-      createdAt:t.createdAt||Date.now()
+      done: !!t.done,
+      carriedOver: !!t.carriedOver,
+      createdAt: t.createdAt || Date.now()
     }));
     if(!merged.length) throw new Error('no valid tasks found');
     todos=todos.concat(merged);
@@ -1159,6 +1191,16 @@ document.addEventListener('keydown',(e)=>{
   if($('modalOverlay').style.display==='flex') closeModal();
   if($('pasteImportOverlay').style.display==='flex') closePasteImport();
 });
+
+let currentDay = todayISO();
+setInterval(() => {
+    const today = todayISO();
+    if (today !== currentDay) {
+        currentDay = today;
+        rolloverTasks();
+        render();
+    }
+}, 60000);
 
 /* ---------------- boot ---------------- */
 ensureDemoUser();
